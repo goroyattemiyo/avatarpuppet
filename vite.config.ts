@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [
     VitePWA({
       registerType: 'autoUpdate',
+      workbox: {
+        // ONNX Runtime の WASM ファイルをプリキャッシュから除外
+        globIgnores: ['**/*.wasm'],
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+      },
       manifest: {
         name: 'Avatar Puppet',
         short_name: 'AvatarPuppet',
