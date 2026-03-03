@@ -1,6 +1,5 @@
 // ============================================================
-// main.ts — Avatar Puppet メインロジック
-// PixiJS v8 でキャラクターパーツを描画・アニメーションする
+// main.ts — Avatar Puppet v2 (PixiJS v8 完全対応)
 // ============================================================
 import {
   Application,
@@ -30,7 +29,7 @@ const IDLE_AMPLITUDE_SCALE = 0.005;
 const IDLE_SPEED = 2;
 const MAX_IMAGE_SIZE = 2048;
 const SPEECH_DURATION = 3000;
-const FEATHER_SIZE = 15; // パーツ境界フェザリングのピクセル数
+const FEATHER_SIZE = 15;
 
 // ============================================================
 // 型定義
@@ -53,54 +52,65 @@ interface PartState {
 }
 
 // ============================================================
-// アプリケーション初期化
+// DOM 要素
 // ============================================================
 const canvasArea = document.getElementById('canvas-area')!;
 const speechBubble = document.getElementById('speech-bubble')!;
 const loadingOverlay = document.getElementById('loading-overlay')!;
 
+// ============================================================
+// PixiJS アプリケーション
+// ============================================================
 const app = new Application();
 
 async function init(): Promise<void> {
+  console.log('[AvatarPuppet] init start');
+
   await app.init({
     background: '#1a1a2e',
     resizeTo: canvasArea,
     antialias: true,
+    preference: 'webgl', // WebGL を優先（互換性重視）
   });
-  canvasArea.insertBefore(app.canvas, speechBubble);
 
-  // サンプル画像の読み込み試行
+  canvasArea.insertBefore(app.canvas, speechBubble);
+  console.log('[AvatarPuppet] PixiJS canvas inserted');
+
+  // サンプル画像の読み込み試行 → 失敗したらプレースホルダー
   try {
     await loadCharacterImage('./sample.png');
-  } catch {
-    showPlaceholder();
+    console.log('[AvatarPuppet] sample.png loaded');
+  } catch (e) {
+    console.warn('[AvatarPuppet] sample.png not found, showing placeholder', e);
+    await showPlaceholder(); // ★ await する
   }
 
   setupUI();
-  app.ticker.add(animationLoop);
+
+  // v8: Ticker コールバックには Ticker インスタンスが渡される
+  app.ticker.add((ticker) => {
+    animationLoop(ticker.deltaTime);
+  });
+
+  console.log('[AvatarPuppet] init complete — ready');
 }
 
 // ============================================================
 // 背景除去処理
 // ============================================================
-
-/** 画像Blobから背景を除去し、透過PNGのHTMLImageElementを返す */
 async function removeBg(source: Blob | string): Promise<HTMLImageElement> {
   showLoading('背景を除去しています…');
   try {
     let inputBlob: Blob;
     if (typeof source === 'string') {
-      // URLの場合はfetchしてBlobに変換
       const res = await fetch(source);
       inputBlob = await res.blob();
     } else {
       inputBlob = source;
     }
-
     const resultBlob = await removeBackground(inputBlob, {
       output: { format: 'image/png' },
     });
-
     const url = URL.createObjectURL(resultBlob);
     const img = await loadImage(url);
     URL.revokeObjectURL(url);
@@ -122,19 +132,18 @@ function hideLoading(): void {
 // ============================================================
 // パーツ境界フェザリング
 // ============================================================
-
-/** キャンバスの矩形端にアルファグラデーションをかける */
 function applyFeathering(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  feather: number
+  feather: number,
 ): void {
+  ctx.globalCompositeOperation = 'destination-in';
+
   // 上端
   const topGrad = ctx.createLinearGradient(0, 0, 0, feather);
   topGrad.addColorStop(0, 'rgba(0,0,0,0)');
   topGrad.addColorStop(1, 'rgba(0,0,0,1)');
-  ctx.globalCompositeOperation = 'destination-in';
   ctx.fillStyle = topGrad;
   ctx.fillRect(0, 0, width, feather);
 
@@ -159,7 +168,6 @@ function applyFeathering(
   ctx.fillStyle = rightGrad;
   ctx.fillRect(width - feather, 0, feather, height);
 
-  // 合成モードを戻す
   ctx.globalCompositeOperation = 'source-over';
 }
 
@@ -172,16 +180,16 @@ let currentExpression = 'neutral';
 let currentPose = 'stand';
 let speechTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** 画像を読み込んでパーツに分割して表示 */
 async function loadCharacterImage(src: string): Promise<void> {
   const img = await loadImage(src);
   buildPartsFromImage(img);
 }
 
-/** 透過済みの画像からパーツを構築する */
 function buildPartsFromImage(img: HTMLImageElement): void {
-  const imgW = Math.min(img.width, MAX_IMAGE_SIZE);
-  const imgH = Math.min(img.height, MAX_IMAGE_SIZE);
+  const imgW = Math.min(img.naturalWidth || img.width, MAX_IMAGE_SIZE);
+  const imgH = Math.min(img.naturalHeight || img.height, MAX_IMAGE_SIZE);
+
+  console.log(`[AvatarPuppet] buildParts: ${imgW}x${imgH}`);
 
   characterContainer.removeChildren();
   partStates.clear();
@@ -196,49 +204,56 @@ function buildPartsFromImage(img: HTMLImageElement): void {
   for (const def of DEFAULT_PARTS) {
     const sx = Math.round(def.region.x * imgW);
     const sy = Math.round(def.region.y * imgH);
-    const sw = Math.round(def.region.w * imgW);
-    const sh = Math.round(def.region.h * imgH);
+    const sw = Math.max(Math.round(def.region.w * imgW), 1);
+    const sh = Math.max(Math.round(def.region.h * imgH), 1);
 
+    // パーツ用キャンバス作成
     const partCanvas = document.createElement('canvas');
     partCanvas.width = sw;
     partCanvas.height = sh;
     const ctx = partCanvas.getContext('2d')!;
     ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
 
-    // フェザリング適用（境界を柔らかくする）
-    applyFeathering(ctx, sw, sh, FEATHER_SIZE);
+    // フェザリング適用
+    if (sw > FEATHER_SIZE * 2 && sh > FEATHER_SIZE * 2) {
+      applyFeathering(ctx, sw, sh, FEATHER_SIZE);
+    }
 
+    // v8: Texture.from は HTMLCanvasElement を直接受け取れる
     const texture = Texture.from(partCanvas);
 
     let displayObject: Sprite | MeshPlane;
 
     if (def.useMesh && def.meshGridX && def.meshGridY) {
+      // v8: MeshPlane はオブジェクト引数
       displayObject = new MeshPlane({
         texture,
         verticesX: def.meshGridX,
         verticesY: def.meshGridY,
       });
-      displayObject.width = sw * fitScale;
-      displayObject.height = sh * fitScale;
     } else {
-      displayObject = new Sprite(texture);
-      displayObject.width = sw * fitScale;
-      displayObject.height = sh * fitScale;
-      displayObject.anchor.set(def.anchorX, def.anchorY);
+      // v8: Sprite もオブジェクト引数推奨
+      displayObject = new Sprite({ texture });
     }
 
-    const baseX = offsetX + sx * fitScale + sw * fitScale * def.anchorX;
-    const baseY = offsetY + sy * fitScale + sh * fitScale * def.anchorY;
+    const scaledW = sw * fitScale;
+    const scaledH = sh * fitScale;
+
+    displayObject.width = scaledW;
+    displayObject.height = scaledH;
+
+    const baseX = offsetX + sx * fitScale + scaledW * def.anchorX;
+    const baseY = offsetY + sy * fitScale + scaledH * def.anchorY;
 
     displayObject.x = baseX;
     displayObject.y = baseY;
     displayObject.zIndex = def.zIndex;
 
-    if (def.useMesh) {
-      displayObject.pivot.set(
-        sw * fitScale * def.anchorX,
-        sh * fitScale * def.anchorY
-      );
+    // Sprite は anchor、MeshPlane は pivot を使う
+    if (displayObject instanceof Sprite) {
+      displayObject.anchor.set(def.anchorX, def.anchorY);
+    } else {
+      displayObject.pivot.set(scaledW * def.anchorX, scaledH * def.anchorY);
     }
 
     characterContainer.addChild(displayObject);
@@ -265,20 +280,20 @@ function buildPartsFromImage(img: HTMLImageElement): void {
   if (!characterContainer.parent) {
     app.stage.addChild(characterContainer);
   }
+
+  console.log(`[AvatarPuppet] ${partStates.size} parts built`);
 }
 
-/** 画像を非同期で読み込むヘルパー */
 function loadImage(src: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => resolve(img);
-    img.onerror = reject;
+    img.onerror = (e) => reject(new Error(`Failed to load image: ${src} — ${e}`));
     img.src = src;
   });
 }
 
-/** ファイルから読み込み（背景除去あり/なし切り替え） */
 async function loadFromFile(file: File, withBgRemoval: boolean): Promise<void> {
   if (withBgRemoval) {
     const img = await removeBg(file);
@@ -293,15 +308,17 @@ async function loadFromFile(file: File, withBgRemoval: boolean): Promise<void> {
   }
 }
 
-/** サンプル画像がないときのプレースホルダー */
-function showPlaceholder(): void {
+// ============================================================
+// プレースホルダー（サンプル画像がない場合）
+// ============================================================
+async function showPlaceholder(): Promise<void> {
+  const W = 512;
+  const H = 768;
   const canvas = document.createElement('canvas');
-  canvas.width = 512;
-  canvas.height = 768;
+  canvas.width = W;
+  canvas.height = H;
   const ctx = canvas.getContext('2d')!;
-
-  // 透明背景（背景除去済みの想定）
-  ctx.clearRect(0, 0, 512, 768);
+  ctx.clearRect(0, 0, W, H);
 
   // 体
   ctx.fillStyle = '#4a6fa5';
@@ -320,7 +337,6 @@ function showPlaceholder(): void {
   ctx.beginPath();
   ctx.ellipse(200, 155, 22, 28, 0, 0, Math.PI * 2);
   ctx.fill();
-  // 瞳孔
   ctx.fillStyle = '#fff';
   ctx.beginPath();
   ctx.ellipse(206, 148, 8, 10, 0, 0, Math.PI * 2);
@@ -362,22 +378,28 @@ function showPlaceholder(): void {
   ctx.fillRect(111, 110, 40, 140);
   ctx.fillRect(361, 110, 40, 140);
 
+  // Data URL 経由で HTMLImageElement を生成し、パーツ構築
   const dataUrl = canvas.toDataURL('image/png');
-  loadCharacterImage(dataUrl);
+  await loadCharacterImage(dataUrl);
+
+  console.log('[AvatarPuppet] placeholder character built');
 }
 
 // ============================================================
-// アニメーション
+// アニメーションループ
 // ============================================================
 let elapsedTime = 0;
 
-function animationLoop(ticker: { deltaTime: number }): void {
-  const dt = ticker.deltaTime / 60;
-  elapsedTime += dt;
+function animationLoop(deltaTime: number): void {
+  // v8: deltaTime は 60fps 基準のフレーム比（1.0 = 1フレーム）
+  // dt は秒単位ではなくフレーム単位でそのまま使う
+  const dt = deltaTime;
+  elapsedTime += dt / 60; // 秒換算のタイマー（idle breathing 用）
 
   for (const [id, state] of partStates) {
     let idleY = 0;
     let idleScaleY = 0;
+
     if (id === 'body') {
       idleY = Math.sin(elapsedTime * IDLE_SPEED) * IDLE_AMPLITUDE_Y;
       idleScaleY = Math.sin(elapsedTime * IDLE_SPEED) * IDLE_AMPLITUDE_SCALE;
@@ -385,7 +407,9 @@ function animationLoop(ticker: { deltaTime: number }): void {
       idleY = Math.sin(elapsedTime * IDLE_SPEED + 0.5) * IDLE_AMPLITUDE_Y * 0.7;
     }
 
-    const factor = 1 - Math.pow(1 - SMOOTH_FACTOR, dt * 60);
+    // スムーズ補間: SMOOTH_FACTOR をフレームレート非依存で適用
+    const factor = 1 - Math.pow(1 - SMOOTH_FACTOR, dt);
+
     state.currentX += (state.targetX - state.currentX) * factor;
     state.currentY += (state.targetY - state.currentY) * factor;
     state.currentScaleX += (state.targetScaleX - state.currentScaleX) * factor;
@@ -402,17 +426,15 @@ function animationLoop(ticker: { deltaTime: number }): void {
 }
 
 // ============================================================
-// 表情・ポーズ・セリフの適用
+// 表情・ポーズ・セリフ
 // ============================================================
 function applyExpression(name: string): void {
   const preset: ExpressionPreset | undefined = EXPRESSIONS[name];
   if (!preset) return;
   currentExpression = name;
-
   applyPartDelta('eyeL', preset.eyeL);
   applyPartDelta('eyeR', preset.eyeR);
   applyPartDelta('mouth', preset.mouth);
-
   updateActiveButton('expression-btns', 'data-expr', name);
 }
 
@@ -420,44 +442,36 @@ function applyPose(name: string): void {
   const preset: PosePreset | undefined = POSES[name];
   if (!preset) return;
   currentPose = name;
-
   if (preset.body) applyPartDelta('body', preset.body);
   if (preset.head) applyPartDelta('head', preset.head);
   if (preset.armL) applyPartDelta('armL', preset.armL);
   if (preset.armR) applyPartDelta('armR', preset.armR);
-
   if (preset.zOverride) {
     for (const [partId, z] of Object.entries(preset.zOverride)) {
       const state = partStates.get(partId);
       if (state) state.displayObject.zIndex = z;
     }
   }
-
   updateActiveButton('pose-btns', 'data-pose', name);
 }
 
 function applySpeech(name: string): void {
   const preset = SPEECHES[name];
   if (!preset) return;
-
   applyExpression(preset.expression);
   applyPose(preset.pose);
-
   speechBubble.textContent = preset.text;
   speechBubble.classList.add('visible');
-
   if (speechTimer) clearTimeout(speechTimer);
   speechTimer = setTimeout(() => {
     speechBubble.classList.remove('visible');
   }, SPEECH_DURATION);
-
   updateActiveButton('speech-btns', 'data-speech', name);
 }
 
 function applyPartDelta(partId: string, delta: TransformDelta): void {
   const state = partStates.get(partId);
   if (!state) return;
-
   if (delta.x !== undefined) state.targetX = delta.x;
   if (delta.y !== undefined) state.targetY = delta.y;
   if (delta.scaleX !== undefined) state.targetScaleX = delta.scaleX;
@@ -475,10 +489,14 @@ function setupUI(): void {
   uploadInput.addEventListener('change', async () => {
     const file = uploadInput.files?.[0];
     if (!file) return;
-    const withBgRemoval = bgToggle.checked;
-    await loadFromFile(file, withBgRemoval);
-    applyExpression(currentExpression);
-    applyPose(currentPose);
+    try {
+      await loadFromFile(file, bgToggle.checked);
+      applyExpression(currentExpression);
+      applyPose(currentPose);
+    } catch (e) {
+      console.error('[AvatarPuppet] Failed to load uploaded file:', e);
+      alert('画像の読み込みに失敗しました。別の画像をお試しください。');
+    }
   });
 
   document.querySelectorAll<HTMLButtonElement>('#expression-btns button').forEach((btn) => {
@@ -502,8 +520,11 @@ function setupUI(): void {
     });
   });
 
+  // 初期状態を適用
   applyExpression('neutral');
   applyPose('stand');
+
+  console.log('[AvatarPuppet] UI setup complete');
 }
 
 function updateActiveButton(groupId: string, attr: string, value: string): void {
@@ -515,4 +536,6 @@ function updateActiveButton(groupId: string, attr: string, value: string): void 
 // ============================================================
 // 起動
 // ============================================================
-init();
+init().catch((err) => {
+  console.error('[AvatarPuppet] Fatal error during init:', err);
+});
