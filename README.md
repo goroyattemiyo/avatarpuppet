@@ -7,7 +7,7 @@
 
 ## デモ
 
-> **https://あなたのユーザー名.github.io/avatar-puppet/**
+> **https://goroyattemiyo.github.io/avatar-puppet/**
 
 ## できること
 
