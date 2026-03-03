@@ -27,11 +27,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+          cache: ''
 
-      - name: Clean install
+      - name: Clean and install
         run: |
+          npm cache clean --force
           rm -rf node_modules
           npm ci
+          echo "=== vite-plugin-pwa チェック ==="
+          ls node_modules/vite-plugin-pwa 2>/dev/null && echo "まだ存在！" || echo "存在しない（正常）"
 
       - name: Build
         run: npm run build
